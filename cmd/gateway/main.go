@@ -31,27 +31,31 @@ func parseBackends(s string) ([]*router.Backend, error) {
 	return out, nil
 }
 
-func newPolicy(name string) (router.Policy, error) {
+func newPolicy(name string, cacheBlocks int, loadFactor float64) (router.Policy, error) {
 	switch name {
 	case "round-robin":
 		return router.NewRoundRobin(), nil
 	case "least-loaded":
 		return router.NewLeastLoaded(), nil
+	case "prefix-aware":
+		return router.NewPrefixAware(cacheBlocks, loadFactor), nil
 	}
-	return nil, fmt.Errorf("unknown policy %q (want round-robin or least-loaded)", name)
+	return nil, fmt.Errorf("unknown policy %q (want round-robin, least-loaded or prefix-aware)", name)
 }
 
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
-	policyName := flag.String("policy", "round-robin", "routing policy: round-robin | least-loaded")
+	policyName := flag.String("policy", "round-robin", "routing policy: round-robin | least-loaded | prefix-aware")
 	backendsFlag := flag.String("backends", "", "comma-separated id=host:port list")
+	cacheBlocks := flag.Int("prefix-cache-blocks", 4096, "prefix-aware: assumed per-backend cache size in blocks (match the backends)")
+	loadFactor := flag.Float64("load-factor", 1.25, "prefix-aware: max in-flight as a multiple of the average")
 	flag.Parse()
 
 	backends, err := parseBackends(*backendsFlag)
 	if err != nil {
 		log.Fatal(err)
 	}
-	policy, err := newPolicy(*policyName)
+	policy, err := newPolicy(*policyName, *cacheBlocks, *loadFactor)
 	if err != nil {
 		log.Fatal(err)
 	}
