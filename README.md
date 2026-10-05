@@ -13,7 +13,7 @@ A cache-aware, fault-tolerant gateway for LLM serving, written in Go. It sits in
 
 ## Results (simulated)
 
-On a 3-replica simulation (mean of 3 seeds), prefix-aware routing with a least-loaded fallback for cold prefixes raised the prefix-cache hit rate from about 28-31% (round-robin / least-loaded) to 68-73% on shared-system-prompt traffic, and from 10-13% to 34% on multi-turn traffic. It cut median time-to-first-token by about 91% to 95% on shared-system traffic. Versus least-loaded, p99 TTFT was about 22% lower at 10 rps and 58% lower at 25 rps on shared-system traffic, and 11% lower on multi-turn traffic. On traffic with nothing to cache it matched least-loaded. A backend killed under load failed only the 3 of 400 requests already streaming from it.
+On a 3-replica simulation (mean of 3 seeds), prefix-aware routing with a least-loaded fallback for cold prefixes raised the prefix-cache hit rate from about 28-32% (round-robin / least-loaded) to 65-71% on shared-system-prompt traffic, and from 10-13% to 33% on multi-turn traffic. It cut median time-to-first-token by about 91% to 95% on shared-system traffic and 44% on multi-turn traffic. Versus least-loaded, p99 TTFT was about 20% lower at 10 rps and 58% lower at 25 rps on shared-system traffic, and 14% lower on multi-turn traffic. On traffic with nothing to cache it matched least-loaded. A backend killed under load failed only the 3 of 400 requests already streaming from it.
 
 These are simulator results, not real GPU measurements. Full tables, caveats and limitations: [docs/RESULTS.md](docs/RESULTS.md).
 ## Quick start

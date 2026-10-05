@@ -106,42 +106,47 @@ powershell -ExecutionPolicy Bypass -File bench/retry-demo.ps1
 
 ## Experiment: cold-prefix fallback (rendezvous vs least-loaded)
 
-Motivation: with rendezvous placement, prefix-aware was about 6% worse than least-loaded at p95 and p99 on uncacheable traffic. Hypothesis: when no replica holds any block of the prompt, a fixed hash placement ignores current load. The gateway gained a `-cold-fallback` flag: `rendezvous` (stable hash of the first block, the default) or `least-loaded`.
+Motivation: with rendezvous placement, prefix-aware was about 6% worse than least-loaded at p95 and p99 on uncacheable traffic. Hypothesis: when no replica holds any block of the prompt, a fixed hash placement ignores current load. The gateway gained a `-cold-fallback` flag: `rendezvous` (stable hash of the first block) or `least-loaded`.
 
-Setup is as above, 3 seeds. The baselines were re-run in the same session, so least-loaded numbers differ slightly from the tables above (its hit rate varies by a few points between sessions). One least-loaded run (shared-system, seed 1) was discarded because the gateway refused connections for part of the measured window (25 errors, p50 3312 ms); it was re-run cleanly after `bench/run.ps1` gained readiness checks. The cause of the original failure is unknown.
+Method notes:
+
+- Setup is as above, 3 seeds. Baselines were re-run in the same session, so least-loaded numbers differ slightly from the earlier tables (its hit rate varies by a few points between sessions).
+- Two runs were discarded and re-run: least-loaded on shared-system (seed 1, 25 errors) and prefix-aware with the least-loaded fallback on multiturn (seed 2, 76 errors). In both, the gateway refused connections for part of the measured window and latencies were 3 to 4 times normal. The gateway process was still alive afterwards. The cause is unknown; contention on the single test machine is a guess, not a finding. All reported numbers come from clean runs.
+- After the first measurement I found a flaw in the least-loaded fallback: exact ties always went to the first replica in the list. Ties are now broken with the rendezvous hash. All least-loaded-fallback rows below are measured after that fix. Before it, the same cells read: shared-system 10 rps 67.6% hit / p95 1052 / p99 1137, 25 rps 72.6% / 1572 / 1720, multiturn 33.9% / 1499 / 1979. These differ from the table below by a few points in either direction, which with 3 seeds cannot be separated from run-to-run noise.
+- The failure experiments earlier in this file used the rendezvous fallback.
 
 | Workload | Policy | Hit rate | TTFT p50 (ms) | p95 | p99 |
 |---|---|---|---|---|---|
 | random | round-robin | 0% | 546 | 696 | 851 |
 | random | least-loaded | 0% | 536 | 620 | 649 |
 | random | prefix-aware (rendezvous) | 0% | 537 | 659 | 691 |
-| random | prefix-aware (least-loaded fallback) | 0% | 525 | 620 | 648 |
+| random | prefix-aware (least-loaded fallback) | 0% | 536 | 620 | 649 |
 | shared-system, 10 rps | round-robin | 28.4% | 1139 | 1427 | 1486 |
 | shared-system, 10 rps | least-loaded | 31.5% | 1082 | 1312 | 1455 |
 | shared-system, 10 rps | prefix-aware (rendezvous) | 61.3% | 99 | 1196 | 1255 |
-| shared-system, 10 rps | prefix-aware (least-loaded fallback) | 67.6% | 95 | 1052 | 1137 |
+| shared-system, 10 rps | prefix-aware (least-loaded fallback) | 64.6% | 96 | 1080 | 1166 |
 | shared-system, 25 rps | round-robin | 28.6% | 2920 | 4135 | 4393 |
 | shared-system, 25 rps | least-loaded | 27.9% | 2945 | 3986 | 4136 |
 | shared-system, 25 rps | prefix-aware (rendezvous) | 69.9% | 148 | 1836 | 2206 |
-| shared-system, 25 rps | prefix-aware (least-loaded fallback) | 72.6% | 140 | 1572 | 1720 |
+| shared-system, 25 rps | prefix-aware (least-loaded fallback) | 71.0% | 140 | 1549 | 1746 |
 | multiturn, 10 rps | round-robin | 13.3% | 806 | 1846 | 2280 |
 | multiturn, 10 rps | least-loaded | 9.8% | 823 | 1830 | 2226 |
 | multiturn, 10 rps | prefix-aware (rendezvous) | 28.0% | 578 | 1675 | 2265 |
-| multiturn, 10 rps | prefix-aware (least-loaded fallback) | 33.9% | 452 | 1499 | 1979 |
+| multiturn, 10 rps | prefix-aware (least-loaded fallback) | 32.5% | 458 | 1506 | 1922 |
 
 Findings:
 
-- On `random` the least-loaded fallback closes the gap: p95 620 and p99 648, versus 620 and 649 for plain least-loaded (rendezvous: 659 and 691). This supports the hypothesis.
-- On `shared-system` it beat rendezvous in every cell and on every seed, which is the opposite of what I predicted. Hit rate rose 2.7 to 6.3 points, p95 fell 10% to 14%, and p99 fell 9% to 22%. Versus plain least-loaded, p99 is 22% lower at 10 rps and 58% lower at 25 rps.
-- On `multiturn` it improved p99 (1979 ms versus 2265 for rendezvous and 2226 for least-loaded) on all 3 seeds. The earlier "no p99 gain on multiturn" result applies only to the rendezvous variant.
+- On `random` the least-loaded fallback removes the cost: p95 620 and p99 649, identical to plain least-loaded (rendezvous: 659 and 691). This supports the hypothesis.
+- Versus rendezvous, the least-loaded fallback is better or equal in every cell: hit rate +1.1 to +4.5 points on cacheable workloads, p95 6% to 16% lower, p99 6% to 21% lower. My prediction before running this was that it would hurt the shared-system workload; it did not.
+- Versus plain least-loaded, the least-loaded fallback has 2.1x (shared-system, 10 rps), 2.5x (25 rps) and 3.3x (multiturn) the hit rate, 91%, 95% and 44% lower median TTFT, and 20%, 58% and 14% lower p99.
 
-Possible explanation (not verified): the 16 system prompts take about 25 cache blocks each, so a 150-block cache holds at most 6. With hash placement of 16 prompts over 3 replicas, the chance that no replica gets more than 6 is about 26%, so most hash assignments overload at least one replica. Load-aware placement may spread the prompts more evenly. Actual placement was not measured.
+Possible explanation for the shared-system gain (not verified): the 16 system prompts take about 25 cache blocks each, so a 150-block cache holds at most 6. With hash placement of 16 prompts over 3 replicas, the chance that no replica gets more than 6 is about 26%, so most assignments overload at least one replica. Load-aware placement may spread the prompts more evenly. Actual placement was not measured.
 
 Remaining limitations of the least-loaded fallback:
 
-- At zero load all replicas tie and the first one in the list wins, so cold prefixes would concentrate on one replica when traffic is light. The benchmarks keep about 15 requests in flight at 10 rps and do not exercise this. A possible fix is to break ties with the rendezvous hash.
-- `Pick` and `Acquire` are not atomic, so simultaneous cold arrivals can all pick the same replica.
-- Rendezvous placement is deterministic, so several gateway replicas would agree without sharing state; least-loaded depends on local load. This matters for a replicated gateway.
-- Sample sizes are the same as above (3 seeds, a few hundred requests per run), so p99 differences under about 10% are within noise. The hit-rate and p95 differences are consistent across seeds.
+- `Pick` and `Acquire` are not atomic, so simultaneous cold arrivals can pick the same replica.
+- Least-loaded placement depends on local load, so several gateway replicas, each seeing only its own in-flight counts, would not agree on where a prefix lives. Rendezvous placement would. This matters for a replicated gateway.
+- 3 seeds and a few hundred requests per run: p99 differences under about 10% are within noise. Hit-rate and p95 differences are the more reliable signal.
+- Everything here is simulated.
 
-For these reasons the default remains `rendezvous`; use `-cold-fallback=least-loaded` for loaded deployments.
+The library and command-line default remain `rendezvous`. `-cold-fallback=least-loaded` is the measured-better setting for a single gateway.
