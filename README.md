@@ -13,10 +13,9 @@ A cache-aware, fault-tolerant gateway for LLM serving, written in Go. It sits in
 
 ## Results (simulated)
 
-On a 3-replica simulation, prefix-aware routing raised prefix-cache hit rate from about 28% to 61% to 70% on shared-system-prompt traffic and cut median time-to-first-token by more than 90%. The p99 improvement was smaller (about 16% at 10 rps, about 50% at 25 rps), there was no p99 gain on multi-turn traffic, and there was a small p99 cost (about 6%) on traffic with nothing to cache. A backend killed under load failed only the 3 of 400 requests already streaming from it.
+On a 3-replica simulation (mean of 3 seeds), prefix-aware routing with a least-loaded fallback for cold prefixes raised the prefix-cache hit rate from about 28-31% (round-robin / least-loaded) to 68-73% on shared-system-prompt traffic, and from 10-13% to 34% on multi-turn traffic. It cut median time-to-first-token by about 91% to 95% on shared-system traffic. Versus least-loaded, p99 TTFT was about 22% lower at 10 rps and 58% lower at 25 rps on shared-system traffic, and 11% lower on multi-turn traffic. On traffic with nothing to cache it matched least-loaded. A backend killed under load failed only the 3 of 400 requests already streaming from it.
 
 These are simulator results, not real GPU measurements. Full tables, caveats and limitations: [docs/RESULTS.md](docs/RESULTS.md).
-
 ## Quick start
 
 ```powershell
@@ -26,7 +25,7 @@ go build -o bin/gateway.exe ./cmd/gateway
 
 .\bin\mockbackend.exe -id=m0 -addr=:9000
 .\bin\mockbackend.exe -id=m1 -addr=:9001
-.\bin\gateway.exe -policy=prefix-aware -backends=m0=localhost:9000,m1=localhost:9001
+.\bin\gateway.exe -policy=prefix-aware -cold-fallback=least-loaded -backends=m0=localhost:9000,m1=localhost:9001
 ```
 
 ## Layout
