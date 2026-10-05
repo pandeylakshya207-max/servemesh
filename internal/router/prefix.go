@@ -209,11 +209,28 @@ func (p *PrefixAware) Pick(req *Request, backends []*Backend) (*Backend, error) 
 			best, bestMatch = b, m
 		}
 	}
-	// Nothing cached anywhere: optionally use a stable "home" so a new prefix concentrates.
-	if bestMatch == 0 && len(hashes) > 0 && p.ColdFallback != ColdLeastLoaded {
-		best = rendezvous(hashes[0], cands)
+	// Nothing cached anywhere.
+	if bestMatch == 0 && len(hashes) > 0 {
+		if p.ColdFallback == ColdLeastLoaded {
+			// Least loaded wins; exact ties are broken by the stable hash so an
+			// idle cluster spreads new prefixes instead of always picking the first backend.
+			minLoad := cands[0].InFlight()
+			for _, b := range cands[1:] {
+				if b.InFlight() < minLoad {
+					minLoad = b.InFlight()
+				}
+			}
+			tied := make([]*Backend, 0, len(cands))
+			for _, b := range cands {
+				if b.InFlight() == minLoad {
+					tied = append(tied, b)
+				}
+			}
+			best = rendezvous(hashes[0], tied)
+		} else {
+			best = rendezvous(hashes[0], cands)
+		}
 	}
-
 	p.record(best.ID, hashes)
 	return best, nil
 }
