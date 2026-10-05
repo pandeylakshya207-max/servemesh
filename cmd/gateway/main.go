@@ -32,14 +32,19 @@ func parseBackends(s string) ([]*router.Backend, error) {
 	return out, nil
 }
 
-func newPolicy(name string, cacheBlocks int, loadFactor float64) (router.Policy, error) {
+func newPolicy(name string, cacheBlocks int, loadFactor float64, cold string) (router.Policy, error) {
 	switch name {
 	case "round-robin":
 		return router.NewRoundRobin(), nil
 	case "least-loaded":
 		return router.NewLeastLoaded(), nil
 	case "prefix-aware":
-		return router.NewPrefixAware(cacheBlocks, loadFactor), nil
+		if cold != router.ColdRendezvous && cold != router.ColdLeastLoaded {
+			return nil, fmt.Errorf("unknown cold fallback %q (want rendezvous or least-loaded)", cold)
+		}
+		p := router.NewPrefixAware(cacheBlocks, loadFactor)
+		p.ColdFallback = cold
+		return p, nil
 	}
 	return nil, fmt.Errorf("unknown policy %q (want round-robin, least-loaded or prefix-aware)", name)
 }
@@ -50,6 +55,7 @@ func main() {
 	backendsFlag := flag.String("backends", "", "comma-separated id=host:port list")
 	cacheBlocks := flag.Int("prefix-cache-blocks", 4096, "prefix-aware: assumed per-backend cache size in blocks (match the backends)")
 	loadFactor := flag.Float64("load-factor", 1.25, "prefix-aware: max in-flight as a multiple of the average")
+	cold := flag.String("cold-fallback", "rendezvous", "prefix-aware: placement when no backend caches the prompt: rendezvous | least-loaded")
 	healthInterval := flag.Duration("health-interval", time.Second, "active health-check interval (0 disables)")
 	healthTimeout := flag.Duration("health-timeout", 500*time.Millisecond, "per-probe timeout")
 	maxAttempts := flag.Int("max-attempts", 3, "max backends tried per request before the first response byte")
@@ -59,7 +65,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	policy, err := newPolicy(*policyName, *cacheBlocks, *loadFactor)
+	policy, err := newPolicy(*policyName, *cacheBlocks, *loadFactor, *cold)
 	if err != nil {
 		log.Fatal(err)
 	}

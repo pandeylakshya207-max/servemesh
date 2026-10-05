@@ -10,7 +10,7 @@ $rows | Group-Object workload, offered_rps, label | ForEach-Object {
     Errors   = ($g | Measure-Object errors -Sum).Sum
     HitPct   = [math]::Round(100 * ($g | Measure-Object cache_hit_rate -Average).Average, 1)
     TTFTp50  = [math]::Round(($g | ForEach-Object { $_.ttft.p50_ms } | Measure-Object -Average).Average)
+    TTFTp95  = [math]::Round(($g | ForEach-Object { $_.ttft.p95_ms } | Measure-Object -Average).Average)
     TTFTp99  = [math]::Round(($g | ForEach-Object { $_.ttft.p99_ms } | Measure-Object -Average).Average)
-    ReqPerS  = [math]::Round(($g | Measure-Object completed_req_per_sec -Average).Average, 1)
   }
 } | Sort-Object Workload, RPS, Policy | Format-Table -AutoSize

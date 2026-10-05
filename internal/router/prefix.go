@@ -11,6 +11,12 @@ import (
 // PrefixBlockSize is the prefix-cache block size in tokens. It must match the backend's.
 const PrefixBlockSize = 16
 
+// Placement modes for PrefixAware.ColdFallback (no backend holds any block of the prompt).
+const (
+	ColdRendezvous  = "rendezvous"
+	ColdLeastLoaded = "least-loaded"
+)
+
 // BlockHashes returns one chained hash per full block of tokens. Each hash covers
 // the block's tokens and all earlier blocks, so equal hashes mean equal prefixes.
 func BlockHashes(tokens []string) []uint64 {
@@ -103,6 +109,12 @@ type PrefixAware struct {
 	capBlocks  int
 	loadFactor float64
 	sets       map[string]*blockSet
+
+	// ColdFallback decides placement when no backend holds any block of the
+	// prompt. ColdRendezvous (default) hashes the first block to a stable home,
+	// so gateway replicas would agree without sharing state. ColdLeastLoaded
+	// picks the least loaded candidate instead.
+	ColdFallback string
 }
 
 // NewPrefixAware: capBlocks should match each backend's real cache size;
@@ -115,9 +127,10 @@ func NewPrefixAware(capBlocks int, loadFactor float64) *PrefixAware {
 		loadFactor = 1.25
 	}
 	return &PrefixAware{
-		capBlocks:  capBlocks,
-		loadFactor: loadFactor,
-		sets:       make(map[string]*blockSet),
+		capBlocks:    capBlocks,
+		loadFactor:   loadFactor,
+		sets:         make(map[string]*blockSet),
+		ColdFallback: ColdRendezvous,
 	}
 }
 
@@ -158,6 +171,7 @@ func (p *PrefixAware) Pick(req *Request, backends []*Backend) (*Backend, error) 
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	// An ejected backend may come back with an empty cache, so forget what we
 	// believed it held; stale entries would attract requests that all miss.
 	for _, b := range backends {
@@ -195,8 +209,8 @@ func (p *PrefixAware) Pick(req *Request, backends []*Backend) (*Backend, error) 
 			best, bestMatch = b, m
 		}
 	}
-	// Nothing cached anywhere: use a stable "home" so a new prefix concentrates.
-	if bestMatch == 0 && len(hashes) > 0 {
+	// Nothing cached anywhere: optionally use a stable "home" so a new prefix concentrates.
+	if bestMatch == 0 && len(hashes) > 0 && p.ColdFallback != ColdLeastLoaded {
 		best = rendezvous(hashes[0], cands)
 	}
 
