@@ -3,7 +3,8 @@ param(
   [string]$Workload = "shared-system",
   [double]$Rps = 10,
   [string]$Duration = "30s",
-  [int]$CacheBlocks = 150
+  [int]$CacheBlocks = 150,
+  [int]$Seed = 1
 )
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
@@ -20,7 +21,7 @@ try {
   }
   $procs += Start-Process .\bin\gateway.exe -ArgumentList "-policy=$Policy","-prefix-cache-blocks=$CacheBlocks","-backends=m0=localhost:9000,m1=localhost:9001,m2=localhost:9002","-addr=:8080" -PassThru -WindowStyle Hidden
   Start-Sleep -Seconds 1
-  .\bin\bench.exe -url http://localhost:8080 -workload $Workload -rps $Rps -duration $Duration -label $Policy -out "bench/results/$Workload-$Policy.json"
+  .\bin\bench.exe -url http://localhost:8080 -workload $Workload -rps $Rps -duration $Duration -seed $Seed -label $Policy -out "bench/results/$Workload-$Policy-rps$Rps-seed$Seed.json"
 } finally {
   $procs | Stop-Process -Force -ErrorAction SilentlyContinue
 }
