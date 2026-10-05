@@ -158,6 +158,13 @@ func (p *PrefixAware) Pick(req *Request, backends []*Backend) (*Backend, error) 
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// An ejected backend may come back with an empty cache, so forget what we
+	// believed it held; stale entries would attract requests that all miss.
+	for _, b := range backends {
+		if !b.Healthy() {
+			delete(p.sets, b.ID)
+		}
+	}
 
 	// Bounded load: exclude backends whose in-flight count is over the cap.
 	var total int64

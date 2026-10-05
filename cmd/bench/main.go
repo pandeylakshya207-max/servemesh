@@ -126,10 +126,16 @@ func doRequest(client *http.Client, url string, body []byte) result {
 	var r result
 	r.Prompt, _ = strconv.Atoi(resp.Header.Get("X-Prompt-Tokens"))
 	r.Cached, _ = strconv.Atoi(resp.Header.Get("X-Cached-Tokens"))
+	sawDone, streamErr := false, false
 	br := bufio.NewReaderSize(resp.Body, 64*1024)
 	for {
 		line, rerr := br.ReadString('\n')
-		if strings.HasPrefix(line, "data: {") && strings.Contains(line, `"content":"`) && !strings.Contains(line, `"content":""`) {
+		switch {
+		case strings.HasPrefix(line, "data: [DONE]"):
+			sawDone = true
+		case strings.HasPrefix(line, `data: {"error"`):
+			streamErr = true
+		case strings.HasPrefix(line, "data: {") && strings.Contains(line, `"content":"`) && !strings.Contains(line, `"content":""`):
 			if r.Tokens == 0 {
 				r.TTFT = time.Since(t0)
 			}
@@ -144,9 +150,15 @@ func doRequest(client *http.Client, url string, body []byte) result {
 		}
 	}
 	r.E2E = time.Since(t0)
-	r.OK = r.Tokens > 0
-	if !r.OK {
+	switch {
+	case streamErr:
+		r.Err = "stream error event"
+	case !sawDone:
+		r.Err = "incomplete stream"
+	case r.Tokens == 0:
 		r.Err = "empty stream"
+	default:
+		r.OK = true
 	}
 	return r
 }
