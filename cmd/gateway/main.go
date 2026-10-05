@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -49,6 +50,9 @@ func main() {
 	backendsFlag := flag.String("backends", "", "comma-separated id=host:port list")
 	cacheBlocks := flag.Int("prefix-cache-blocks", 4096, "prefix-aware: assumed per-backend cache size in blocks (match the backends)")
 	loadFactor := flag.Float64("load-factor", 1.25, "prefix-aware: max in-flight as a multiple of the average")
+	healthInterval := flag.Duration("health-interval", time.Second, "active health-check interval (0 disables)")
+	healthTimeout := flag.Duration("health-timeout", 500*time.Millisecond, "per-probe timeout")
+	maxAttempts := flag.Int("max-attempts", 3, "max backends tried per request before the first response byte")
 	flag.Parse()
 
 	backends, err := parseBackends(*backendsFlag)
@@ -61,6 +65,12 @@ func main() {
 	}
 
 	gw := proxy.New(policy, backends)
+	gw.MaxAttempts = *maxAttempts
+	if *healthInterval > 0 {
+		hc := proxy.NewHealthChecker(backends, *healthInterval, *healthTimeout)
+		go hc.Run(context.Background())
+	}
+
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           gw.Handler(),
