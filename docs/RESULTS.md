@@ -150,3 +150,42 @@ Remaining limitations of the least-loaded fallback:
 - Everything here is simulated.
 
 The library and command-line default remain `rendezvous`. `-cold-fallback=least-loaded` is the measured-better setting for a single gateway.
+
+## Real engine: llama.cpp on CPU
+
+The routing study above used a simulator. This section runs the same gateway in front of three real llama-server replicas.
+
+Setup:
+
+- llama.cpp release b11429, model Qwen2.5-0.5B-Instruct (Q4_K_M), 3 replicas on one Windows laptop, each with 4 slots and 3 CPU threads. The gateway probes `/health` and its response-header timeout is raised to 120 s.
+- Sequential single-client replay (`cmd/replay`): 100 requests, the first 12 excluded, 6 distinct system prompts of 60 random words each, a unique 15-word user message, 8 output tokens. Each prompt is about 530 model tokens.
+- For a given seed the request sequence is identical for every policy, so comparisons are paired. 5 seeds, 88 measured requests per run, 440 per policy.
+- Cache hits come from llama.cpp's own per-request counters (`cache_n` reused tokens, `prompt_n` processed tokens). Warm means the cache covered at least half of the prompt.
+- All 10 runs had 0 request errors, 0 retries, 0 upstream timeouts and 3 healthy replicas.
+
+Results (mean over 5 seeds):
+
+| | round-robin | prefix-aware (least-loaded fallback) |
+|---|---|---|
+| Cache hit rate (range) | 71.5% (69.9 to 72.6) | 78.8% (78.0 to 79.7) |
+| Mean prompt tokens prefilled per request | 151 | 112 |
+| Cold requests | 46 of 440 (10.5%) | 5 of 440 (1.1%) |
+| TTFT p50 | 998 ms | 997 ms |
+| TTFT p95 | 3933 ms | 1125 ms |
+
+Findings:
+
+- Prefix-aware routing had the higher hit rate on all 5 paired seeds, with non-overlapping ranges, and prefilled 26% fewer prompt tokens. Its hit rate was reproducible: seed 1 gave 78.0% and 117 tokens in two separate sessions.
+- Median TTFT was unchanged (998 vs 997 ms; the per-seed differences were within 3% and of mixed sign). Most requests are warm under both policies, and a warm request still pays about 1 s to prefill its own 110 to 150 unique tokens.
+- p95 TTFT fell 71%. The cause is fewer cold requests (10.5% to 1.1%); a cold request costs about 3.9 s, about 4 times a warm one. This is partly a threshold effect: round-robin has more than 5% cold requests, so its p95 falls among them, while prefix-aware has about 1%, so its p95 falls among warm ones. A rough mean TTFT from the warm/cold split is about 1.3 s vs 1.03 s (about 20% lower); this is an estimate, since the tool does not report a mean.
+- Absolute latency drifted upward by about 10% over the session in both policies (p50 about 930 to 1040 ms), so only within-seed comparisons are meaningful.
+
+Compared with the simulator, the real engine behaved very differently. Round-robin reached a 71.5% hit rate here versus about 28% in the simulator, and the gain from prefix-aware routing is about 7 points rather than a doubling. My prediction before running was that round-robin would hit about 52%, because 6 prompts should not fit in 4 slots; the observed warm fraction (89.5%) shows llama.cpp retains more than its slot count. The cause is not verified (one possibility is a host-memory prompt cache in recent llama-server builds). The simulator's cache model was harsher than this engine's on this workload, so its large gains should not be read as predictions for real engines.
+
+Limitations:
+
+- The client is sequential, so there is no queueing. This measures cache effects only, not load balancing or capacity. Open-loop runs at 0.1 to 0.5 requests/s on this machine were dominated by CPU contention and occasional stalls of unknown cause (three servers, the gateway and the load generator share one laptop) and are not reported. An earlier open-loop run did expose a real gateway flaw: a hard-coded 30 s header timeout caused slow-but-alive replicas to be ejected and retried. Slow responses now return 504 without ejection or retry, and the timeout is configurable.
+- One small model, CPU only, one machine, 6 prompt groups. With more groups, round-robin should degrade further; this has not been tested.
+- Least-loaded was not compared: with one request in flight at a time every replica reports zero load, so it always picks the first.
+- The gateway's prefix tracker hashes blocks of whitespace-separated words, not model tokens; it only needs identical prefixes to hash identically.
+- Not tested on a GPU or on vLLM.

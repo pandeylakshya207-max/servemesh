@@ -7,15 +7,20 @@ A cache-aware, fault-tolerant gateway for LLM serving, written in Go. It sits in
 ## Features
 
 - Streaming reverse proxy for `/v1/chat/completions` (SSE).
-- Pluggable routing policies: round-robin, least-loaded, and prefix-aware (routes to the replica most likely to hold the prompt's prefix in its KV cache, with a bounded-load cap and rendezvous-hash placement for cold prefixes).
-- Active and passive health checking, retry on a different replica before the first byte, and explicit error events when a stream fails midway.
-- A mock replica with a simulated prefix cache, and an open-loop (Poisson) benchmark harness with seeded workloads.
+- Pluggable routing policies: round-robin, least-loaded, and prefix-aware (routes to the replica most likely to hold the prompt's prefix in its KV cache, with a bounded-load cap and a choice of cold-prefix placement).
+- Active and passive health checking, retry on a different replica before the first byte, explicit error events when a stream fails midway, and a configurable response-header timeout that returns 504 for slow backends without ejecting them.
+- A mock replica with a simulated prefix cache, an open-loop (Poisson) benchmark harness, and a sequential replay tool that reads real cache counters from llama.cpp.
 
-## Results (simulated)
+## Results
 
-On a 3-replica simulation (mean of 3 seeds), prefix-aware routing with a least-loaded fallback for cold prefixes raised the prefix-cache hit rate from about 28-32% (round-robin / least-loaded) to 65-71% on shared-system-prompt traffic, and from 10-13% to 33% on multi-turn traffic. It cut median time-to-first-token by about 91% to 95% on shared-system traffic and 44% on multi-turn traffic. Versus least-loaded, p99 TTFT was about 20% lower at 10 rps and 58% lower at 25 rps on shared-system traffic, and 14% lower on multi-turn traffic. On traffic with nothing to cache it matched least-loaded. A backend killed under load failed only the 3 of 400 requests already streaming from it.
+**Real engine (llama.cpp, Qwen2.5-0.5B, 3 CPU replicas, sequential client, 5 seeds):** prefix-aware routing raised the prefix-cache hit rate from about 71.5% to 78.8% on every paired seed, cut prompt tokens prefilled by 26%, and cut p95 time-to-first-token by 71% (cold requests fell from 10.5% to 1.1%). Median TTFT was unchanged. This is a modest, real gain.
 
-These are simulator results, not real GPU measurements. Full tables, caveats and limitations: [docs/RESULTS.md](docs/RESULTS.md).
+**Simulation:** in a mock-replica simulator prefix-aware routing looked much stronger (hit rate from about 28% to 65-73%). That did not carry over to the real engine, whose cache retained far more than the simulator's did, so treat the simulated numbers as design exploration, not predictions.
+
+A backend killed under load failed only the 3 of 400 requests already streaming from it (simulator).
+
+Full tables, caveats and limitations: [docs/RESULTS.md](docs/RESULTS.md). Not yet tested: GPUs, vLLM, concurrent load on real replicas, more prompt groups than fit in cache.
+
 ## Quick start
 
 ```powershell
@@ -28,13 +33,16 @@ go build -o bin/gateway.exe ./cmd/gateway
 .\bin\gateway.exe -policy=prefix-aware -cold-fallback=least-loaded -backends=m0=localhost:9000,m1=localhost:9001
 ```
 
+For real llama-server replicas, add `-health-path=/health` and see `bench/replay-llama.ps1`.
+
 ## Layout
 
 - `internal/router`: routing policies
 - `internal/proxy`: streaming gateway, health checks
 - `internal/backend`: mock replica with a simulated prefix cache
-- `cmd/bench`: load generator; `bench/`: run, chaos and retry scripts
+- `cmd/bench`: open-loop load generator; `cmd/replay`: sequential replay against llama.cpp
+- `bench/`: run, chaos, retry and llama scripts
 
 ## Status
 
-The gateway is validated against a simulator only. Planned: validation against real vLLM replicas, and a replicated (HA) gateway control plane.
+Validated against a simulator and, at small scale, against real llama.cpp replicas. Planned: validation against vLLM on a GPU, a replicated (HA) gateway control plane.
