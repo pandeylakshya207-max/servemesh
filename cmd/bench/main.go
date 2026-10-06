@@ -105,6 +105,24 @@ type result struct {
 	Err    string
 }
 
+// jsonInt extracts the integer that follows `"key":` in a JSON line.
+func jsonInt(line, key string) (int, bool) {
+	i := strings.Index(line, `"`+key+`":`)
+	if i < 0 {
+		return 0, false
+	}
+	rest := line[i+len(key)+3:]
+	j := 0
+	for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+		j++
+	}
+	if j == 0 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(rest[:j])
+	return n, err == nil
+}
+
 func doRequest(client *http.Client, url string, body []byte) result {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -127,9 +145,18 @@ func doRequest(client *http.Client, url string, body []byte) result {
 	r.Prompt, _ = strconv.Atoi(resp.Header.Get("X-Prompt-Tokens"))
 	r.Cached, _ = strconv.Atoi(resp.Header.Get("X-Cached-Tokens"))
 	sawDone, streamErr := false, false
+	timedCached, timedProcessed, haveTimings := 0, 0, false
 	br := bufio.NewReaderSize(resp.Body, 64*1024)
 	for {
 		line, rerr := br.ReadString('\n')
+		if strings.HasPrefix(line, "data: {") && strings.Contains(line, `"timings"`) {
+			if c, ok := jsonInt(line, "cache_n"); ok {
+				timedCached, haveTimings = c, true
+			}
+			if p, ok := jsonInt(line, "prompt_n"); ok {
+				timedProcessed = p
+			}
+		}
 		switch {
 		case strings.HasPrefix(line, "data: [DONE]"):
 			sawDone = true
@@ -150,6 +177,11 @@ func doRequest(client *http.Client, url string, body []byte) result {
 		}
 	}
 	r.E2E = time.Since(t0)
+	if r.Prompt == 0 && haveTimings {
+		// llama.cpp: prompt_n counts tokens processed, cache_n tokens reused.
+		r.Cached = timedCached
+		r.Prompt = timedCached + timedProcessed
+	}
 	switch {
 	case streamErr:
 		r.Err = "stream error event"

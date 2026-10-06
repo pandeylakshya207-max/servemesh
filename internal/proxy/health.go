@@ -11,7 +11,7 @@ import (
 	"github.com/pandeylakshya207-max/servemesh/internal/router"
 )
 
-// HealthChecker actively probes each backend's /healthz. A backend is ejected
+// HealthChecker actively probes each backend's health endpoint. A backend is ejected
 // after FailThreshold consecutive failures and restored after RiseThreshold
 // consecutive successes (hysteresis, so one blip does not cause flapping).
 type HealthChecker struct {
@@ -21,6 +21,7 @@ type HealthChecker struct {
 	timeout       time.Duration
 	FailThreshold int
 	RiseThreshold int
+	Path          string // health endpoint path; default /healthz
 
 	// Touched only by CheckOnce's caller goroutine.
 	fails map[*router.Backend]int
@@ -35,6 +36,7 @@ func NewHealthChecker(backends []*router.Backend, interval, timeout time.Duratio
 		timeout:       timeout,
 		FailThreshold: 2,
 		RiseThreshold: 2,
+		Path:          "/healthz",
 		fails:         make(map[*router.Backend]int),
 		rises:         make(map[*router.Backend]int),
 	}
@@ -43,7 +45,7 @@ func NewHealthChecker(backends []*router.Backend, interval, timeout time.Duratio
 func (h *HealthChecker) probe(ctx context.Context, b *router.Backend) bool {
 	ctx, cancel := context.WithTimeout(ctx, h.timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+b.Addr+"/healthz", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+b.Addr+h.Path, nil)
 	if err != nil {
 		return false
 	}

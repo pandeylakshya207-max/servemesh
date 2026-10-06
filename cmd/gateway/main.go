@@ -58,7 +58,9 @@ func main() {
 	cold := flag.String("cold-fallback", "rendezvous", "prefix-aware: placement when no backend caches the prompt: rendezvous | least-loaded")
 	healthInterval := flag.Duration("health-interval", time.Second, "active health-check interval (0 disables)")
 	healthTimeout := flag.Duration("health-timeout", 500*time.Millisecond, "per-probe timeout")
+	healthPath := flag.String("health-path", "/healthz", "health endpoint path on the backends (llama-server uses /health)")
 	maxAttempts := flag.Int("max-attempts", 3, "max backends tried per request before the first response byte")
+	headerTimeout := flag.Duration("header-timeout", 30*time.Second, "how long to wait for a backend to start responding (raise for CPU-bound or queueing backends)")
 	flag.Parse()
 
 	backends, err := parseBackends(*backendsFlag)
@@ -72,8 +74,10 @@ func main() {
 
 	gw := proxy.New(policy, backends)
 	gw.MaxAttempts = *maxAttempts
+	gw.SetResponseHeaderTimeout(*headerTimeout)
 	if *healthInterval > 0 {
 		hc := proxy.NewHealthChecker(backends, *healthInterval, *healthTimeout)
+		hc.Path = *healthPath
 		go hc.Run(context.Background())
 	}
 

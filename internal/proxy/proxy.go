@@ -34,6 +34,7 @@ type Gateway struct {
 
 	retries           atomic.Int64
 	midStreamFailures atomic.Int64
+	upstreamTimeouts  atomic.Int64
 }
 
 func New(policy router.Policy, backends []*router.Backend) *Gateway {
@@ -58,6 +59,13 @@ func New(policy router.Policy, backends []*router.Backend) *Gateway {
 }
 
 func (g *Gateway) Handler() http.Handler { return g.mux }
+
+// SetResponseHeaderTimeout sets how long the gateway waits for a backend to start
+// responding. With a queueing backend (for example a saturated llama-server) this
+// bounds time-to-first-byte.
+func (g *Gateway) SetResponseHeaderTimeout(d time.Duration) {
+	g.client.Transport.(*http.Transport).ResponseHeaderTimeout = d
+}
 
 func (g *Gateway) maxAttempts() int {
 	if g.MaxAttempts > 0 {
@@ -147,8 +155,8 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 // tryBackend returns true once the response is committed to the client (success,
-// a client-side error, or a mid-stream failure) and false if the attempt failed
-// before any byte reached the client, so the caller may retry elsewhere.
+// a client-side error, a timeout, or a mid-stream failure) and false if the attempt
+// failed before any byte reached the client, so the caller may retry elsewhere.
 func (g *Gateway) tryBackend(w http.ResponseWriter, r *http.Request, b *router.Backend, body []byte, reqID string, attempt int) bool {
 	b.Acquire()
 	defer b.Release()
@@ -165,6 +173,14 @@ func (g *Gateway) tryBackend(w http.ResponseWriter, r *http.Request, b *router.B
 	if err != nil {
 		if r.Context().Err() != nil {
 			return true // the client went away; not the backend's fault
+		}
+		if strings.Contains(err.Error(), "awaiting response headers") {
+			// Slow, not dead: do not eject it and do not retry (a retry would add
+			// load to an overloaded cluster). Active health checks decide ejection.
+			g.upstreamTimeouts.Add(1)
+			log.Printf("%s: backend %s timed out waiting for a response", reqID, b.ID)
+			http.Error(w, "upstream timeout", http.StatusGatewayTimeout)
+			return true
 		}
 		log.Printf("%s: attempt %d: backend %s unreachable: %v", reqID, attempt, b.ID, err)
 		b.SetHealthy(false)
@@ -259,5 +275,6 @@ func (g *Gateway) handleBackends(w http.ResponseWriter, _ *http.Request) {
 		"backends":           rows,
 		"retries":            g.retries.Load(),
 		"midstream_failures": g.midStreamFailures.Load(),
+		"upstream_timeouts":  g.upstreamTimeouts.Load(),
 	})
 }
