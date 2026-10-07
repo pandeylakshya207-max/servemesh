@@ -12,6 +12,7 @@ import (
 	"net/http/httptrace"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -39,6 +40,10 @@ type Gateway struct {
 	midStreamFailures atomic.Int64
 	upstreamTimeouts  atomic.Int64
 	staleRetries      atomic.Int64
+
+	// pickMu makes choosing a backend and reserving a slot on it one atomic step,
+	// so simultaneous requests cannot all pick the same least-loaded backend.
+	pickMu sync.Mutex
 }
 
 func New(policy router.Policy, backends []*router.Backend) *Gateway {
@@ -140,7 +145,12 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	attempts := 0
 	var pickErr error
 	for attempts < g.maxAttempts() {
+		g.pickMu.Lock()
 		b, perr := g.policy.Pick(req, g.untried(tried))
+		if perr == nil {
+			b.Acquire() // reserve under the lock; tryBackend releases it
+		}
+		g.pickMu.Unlock()
 		if perr != nil {
 			pickErr = perr
 			break
@@ -208,8 +218,7 @@ func (g *Gateway) do(ctx context.Context, b *router.Backend, body []byte, reqID 
 // a client-side error, a timeout, or a mid-stream failure) and false if the attempt
 // failed before any byte reached the client, so the caller may retry elsewhere.
 func (g *Gateway) tryBackend(w http.ResponseWriter, r *http.Request, b *router.Backend, body []byte, reqID string, attempt int) bool {
-	b.Acquire()
-	defer b.Release()
+	defer b.Release() // the caller reserved this slot under pickMu
 
 	resp, err := g.do(r.Context(), b, body, reqID)
 	if err != nil {

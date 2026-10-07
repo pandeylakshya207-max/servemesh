@@ -144,7 +144,7 @@ Possible explanation for the shared-system gain (not verified): the 16 system pr
 
 Remaining limitations of the least-loaded fallback:
 
-- `Pick` and `Acquire` are not atomic, so simultaneous cold arrivals can pick the same replica.
+- `Pick` and `Acquire` were not atomic when these numbers were measured, so simultaneous cold arrivals could pick the same replica. The gateway now reserves a slot under one lock together with the pick (with a test); no benchmark in this document was re-run after that change, and the lock serializes `Pick` calls, which costs more for long prompts.
 - Least-loaded placement depends on local load, so several gateway replicas, each seeing only its own in-flight counts, would not agree on where a prefix lives. Rendezvous placement would. This matters for a replicated gateway.
 - 3 seeds and a few hundred requests per run: p99 differences under about 10% are within noise. Hit-rate and p95 differences are the more reliable signal.
 - Everything here is simulated.
