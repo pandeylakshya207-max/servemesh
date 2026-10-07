@@ -2,12 +2,14 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -24,7 +26,8 @@ var doneMarker = []byte("[DONE]")
 type Gateway struct {
 	policy   router.Policy
 	backends []*router.Backend
-	client   *http.Client
+	client   *http.Client // pooled connections
+	fresh    *http.Client // new connection per request; used to retry a stale pooled connection
 	mux      *http.ServeMux
 	seq      atomic.Uint64
 
@@ -35,6 +38,7 @@ type Gateway struct {
 	retries           atomic.Int64
 	midStreamFailures atomic.Int64
 	upstreamTimeouts  atomic.Int64
+	staleRetries      atomic.Int64
 }
 
 func New(policy router.Policy, backends []*router.Backend) *Gateway {
@@ -44,8 +48,14 @@ func New(policy router.Policy, backends []*router.Backend) *Gateway {
 		MaxAttempts: 3,
 		// No overall Timeout: it would cut off long streams.
 		client: &http.Client{Transport: &http.Transport{
-			MaxIdleConnsPerHost:   256,
-			IdleConnTimeout:       90 * time.Second,
+			MaxIdleConnsPerHost: 256,
+			// Keep this below the backends' keep-alive timeout (llama-server advertises
+			// 5 s); otherwise a request can race with the backend closing an idle connection.
+			IdleConnTimeout:       4 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+		}},
+		fresh: &http.Client{Transport: &http.Transport{
+			DisableKeepAlives:     true,
 			ResponseHeaderTimeout: 30 * time.Second,
 		}},
 		mux: http.NewServeMux(),
@@ -65,6 +75,7 @@ func (g *Gateway) Handler() http.Handler { return g.mux }
 // bounds time-to-first-byte.
 func (g *Gateway) SetResponseHeaderTimeout(d time.Duration) {
 	g.client.Transport.(*http.Transport).ResponseHeaderTimeout = d
+	g.fresh.Transport.(*http.Transport).ResponseHeaderTimeout = d
 }
 
 func (g *Gateway) maxAttempts() int {
@@ -154,6 +165,45 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "all upstream attempts failed", http.StatusBadGateway)
 }
 
+// isConnReset reports whether err looks like the peer closing or resetting a connection.
+func isConnReset(err error) bool {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "forcibly closed")
+}
+
+// do sends the request to one backend. If the failure looks like a stale pooled
+// connection (a reused connection that died before any response byte), it retries
+// once on a fresh connection to the same backend; Go does not retry a POST itself.
+func (g *Gateway) do(ctx context.Context, b *router.Backend, body []byte, reqID string) (*http.Response, error) {
+	send := func(c *http.Client) (*http.Response, bool, error) {
+		var reused atomic.Bool
+		trace := &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) { reused.Store(info.Reused) },
+		}
+		req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), http.MethodPost,
+			"http://"+b.Addr+"/v1/chat/completions", bytes.NewReader(body))
+		if err != nil {
+			return nil, false, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := c.Do(req)
+		return resp, reused.Load(), err
+	}
+
+	resp, reused, err := send(g.client)
+	if err != nil && reused && ctx.Err() == nil && isConnReset(err) {
+		g.staleRetries.Add(1)
+		log.Printf("%s: backend %s: pooled connection was stale (%v); retrying on a fresh connection", reqID, b.ID, err)
+		resp, _, err = send(g.fresh)
+	}
+	return resp, err
+}
+
 // tryBackend returns true once the response is committed to the client (success,
 // a client-side error, a timeout, or a mid-stream failure) and false if the attempt
 // failed before any byte reached the client, so the caller may retry elsewhere.
@@ -161,15 +211,7 @@ func (g *Gateway) tryBackend(w http.ResponseWriter, r *http.Request, b *router.B
 	b.Acquire()
 	defer b.Release()
 
-	up, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
-		"http://"+b.Addr+"/v1/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return true
-	}
-	up.Header.Set("Content-Type", "application/json")
-
-	resp, err := g.client.Do(up)
+	resp, err := g.do(r.Context(), b, body, reqID)
 	if err != nil {
 		if r.Context().Err() != nil {
 			return true // the client went away; not the backend's fault
@@ -276,5 +318,6 @@ func (g *Gateway) handleBackends(w http.ResponseWriter, _ *http.Request) {
 		"retries":            g.retries.Load(),
 		"midstream_failures": g.midStreamFailures.Load(),
 		"upstream_timeouts":  g.upstreamTimeouts.Load(),
+		"stale_conn_retries": g.staleRetries.Load(),
 	})
 }
