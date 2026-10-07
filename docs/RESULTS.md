@@ -208,7 +208,7 @@ Background, checked against the llama.cpp sources: since PR #16391 (October 2025
 
 ### Follow-up: host-memory prompt cache disabled (`--cache-ram 0`)
 
-Same 12-group setup, 140 requests per run (first 40 excluded), but every llama-server replica was started with `--cache-ram 0`, which I expected to disable the host-memory prompt cache (the server logs were not inspected, so this is inferred from the effect). 3 seeds per policy.
+Same 12-group setup, 140 requests per run (first 40 excluded), but every llama-server replica was started with `--cache-ram 0`, which disables the host-memory prompt cache (the last run's server log shows the flag was accepted and the RAM cache treated as off: it printed `--cache-idle-slots requires --cache-ram, disabling`; that the cache was active in the default runs is inferred from the size of the effect, because no log line giving its size was found). 3 seeds per policy.
 
 | | round-robin | prefix-aware (least-loaded fallback) |
 |---|---|---|
@@ -222,7 +222,7 @@ Same 12-group setup, 140 requests per run (first 40 excluded), but every llama-s
 Findings:
 
 - With the host cache disabled, prefix-aware routing had the higher hit rate on all 3 seeds (mean 54.8% vs 27.0%), prefilled 38% fewer prompt tokens, cut the cold-request share from 67% to 32%, and halved median TTFT. With the default configuration the gap was 6.6 points (72.7% vs 79.3%). Cache-aware routing therefore matters much more when per-replica cache is scarce.
-- Disabling the flag cut round-robin's hit rate from 72.7% to 27.0%, so the default configuration was retaining far more than the 4 slots. This matches the host-memory prompt cache added in llama.cpp PR #16391; the server logs were not checked.
+- Disabling the flag cut round-robin's hit rate from 72.7% to 27.0%, so the default configuration was retaining far more than the 4 slots. This matches the host-memory prompt cache added in llama.cpp PR #16391. The same log shows a related default-on option, `--cache-idle-slots`, being disabled because it requires `--cache-ram`, so part of the effect may come from that option; the two were not isolated.
 - My prediction before running was that prefix-aware would stay near 79%. It averaged 54.8% and varied from 39.5% to 67.9% across seeds. A possible cause (not measured) is that seeds change how the 12 prompts spread over the replicas, and an uneven split overflows the 4 slots on some replica. With 3 seeds the spread is not explained.
 - p95 TTFT is about equal (4063 vs 4084 ms) because both policies have more than 5% cold requests, so the p95 lands among cold requests in both.
 
