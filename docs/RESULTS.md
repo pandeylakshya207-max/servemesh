@@ -185,7 +185,23 @@ Compared with the simulator, the real engine behaved very differently. Round-rob
 Limitations:
 
 - The client is sequential, so there is no queueing. This measures cache effects only, not load balancing or capacity. Open-loop runs at 0.1 to 0.5 requests/s on this machine were dominated by CPU contention and occasional stalls of unknown cause (three servers, the gateway and the load generator share one laptop) and are not reported. An earlier open-loop run (1 request/s) showed 27 retries and 5 gateway 502s. My reading, not confirmed by tracing, is that the hard-coded 30 s header timeout made the gateway treat queued but alive replicas as dead, ejecting and retrying them. Slow responses now return 504 without ejection or retry, and the timeout is configurable; later runs also used much lower load, so how much of the improvement is due to the fix was not separated.
-- One small model, CPU only, one machine, 6 prompt groups. With more groups, round-robin should degrade further; this has not been tested.
+- One small model, CPU only, one machine. Tested with 6 and 12 prompt groups (see the follow-up below); neither pressured the cache enough to hurt round-robin.
 - Least-loaded was not compared: with one request in flight at a time every replica reports zero load, so it always picks the first.
 - The gateway's prefix tracker hashes blocks of whitespace-separated words, not model tokens; it only needs identical prefixes to hash identically.
 - Not tested on a GPU or on vLLM.
+
+### Follow-up: 12 prompt groups
+
+Same setup, but 12 distinct system prompts and 140 requests per run (first 40 excluded), 3 seeds, 300 measured requests per policy. All 6 runs had 0 errors, 0 retries, 0 upstream timeouts and 3 healthy replicas.
+
+| | round-robin | prefix-aware (least-loaded fallback) |
+|---|---|---|
+| Cache hit rate (per seed) | 72.7% (73.5, 71.9, 72.7) | 79.3% (78.2, 79.8, 79.8) |
+| Mean prompt tokens prefilled per request | 145 | 110 |
+| Cold requests | 27 of 300 (9.0%) | 2 of 300 (0.7%) |
+| TTFT p50 | 975 ms | 1002 ms |
+| TTFT p95 | 3869 ms | 1178 ms |
+
+Doubling the number of groups changed almost nothing: round-robin's hit rate went from 71.5% to 72.7% and its cold share from 10.5% to 9.0%; the hit-rate gap went from 7.3 to 6.6 points and the p95 reduction stayed at about 70%. My earlier expectation that round-robin would degrade with more groups than slots was not supported at 12 groups.
+
+Background, checked against the llama.cpp sources: since PR #16391 (October 2025), llama-server has a host-memory prompt cache that acts as extra slots, controlled by `--cache-ram`; this build (b11429) postdates it. It would explain why replicas retain far more than their 4 slots, but whether it was active in these runs and its default size were not verified. The next experiment disables it.
