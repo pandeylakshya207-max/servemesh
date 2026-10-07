@@ -10,6 +10,7 @@ param(
   [int]$MaxTokens = 8,
   [int]$Slots = 4,
   [int]$Threads = 3,
+  [int]$CacheRam = -1,
   [string]$HeaderTimeout = "120s",
   [string]$Server = (Join-Path $HOME "llama.cpp\llama-server.exe")
 )
@@ -24,6 +25,7 @@ go build -o bin/replay.exe ./cmd/replay
 $Label = $Policy
 if ($Policy -eq "prefix-aware" -and $ColdFallback -eq "least-loaded") { $Label = "prefix-aware-ll" }
 $FullLabel = "llama-$Label"
+if ($CacheRam -eq 0) { $FullLabel = "$FullLabel-noram" }
 $PrefixBlocks = $Slots * 8
 
 foreach ($port in 8080, 9100, 9101, 9102) {
@@ -51,7 +53,9 @@ try {
     $port = 9100 + $i
     $out = Join-Path $root "bench/results/llama-server-$i.out.log"
     $err = Join-Path $root "bench/results/llama-server-$i.err.log"
-    $p = Start-Process $Server -ArgumentList "-hf","Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M","--port","$port","-np","$Slots","-c","$($Slots * 2048)","-t","$Threads" -PassThru -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err
+    $srvArgs = @("-hf","Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M","--port","$port","-np","$Slots","-c","$($Slots * 2048)","-t","$Threads")
+    if ($CacheRam -ge 0) { $srvArgs += @("--cache-ram","$CacheRam") }
+    $p = Start-Process $Server -ArgumentList $srvArgs -PassThru -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err
     $procs += $p
     if (-not (Wait-Ready $p "http://127.0.0.1:$port/health" 240)) { throw "llama-server $i did not become ready; see $err" }
   }

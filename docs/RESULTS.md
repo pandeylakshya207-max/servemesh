@@ -205,3 +205,29 @@ Same setup, but 12 distinct system prompts and 140 requests per run (first 40 ex
 Doubling the number of groups changed almost nothing: round-robin's hit rate went from 71.5% to 72.7% and its cold share from 10.5% to 9.0%; the hit-rate gap went from 7.3 to 6.6 points and the p95 reduction stayed at about 70%. My earlier expectation that round-robin would degrade with more groups than slots was not supported at 12 groups.
 
 Background, checked against the llama.cpp sources: since PR #16391 (October 2025), llama-server has a host-memory prompt cache that acts as extra slots, controlled by `--cache-ram`; this build (b11429) postdates it. It would explain why replicas retain far more than their 4 slots, but whether it was active in these runs and its default size were not verified. The next experiment disables it.
+
+### Follow-up: host-memory prompt cache disabled (`--cache-ram 0`)
+
+Same 12-group setup, 140 requests per run (first 40 excluded), but every llama-server replica was started with `--cache-ram 0`, which I expected to disable the host-memory prompt cache (the server logs were not inspected, so this is inferred from the effect). 3 seeds per policy.
+
+| | round-robin | prefix-aware (least-loaded fallback) |
+|---|---|---|
+| Cache hit rate, seed 1 / 2 / 3 | 31.1 / 29.3 / 20.6% | 39.5 / 56.9 / 67.9% |
+| Cache hit rate, mean | 27.0% | 54.8% |
+| Mean prompt tokens prefilled per request | 387 | 240 |
+| Cold requests | 200 of 299 (66.9%) | 95 of 300 (31.7%) |
+| TTFT p50 | 3494 ms | 1749 ms |
+| TTFT p95 | 4084 ms | 4063 ms |
+
+Findings:
+
+- With the host cache disabled, prefix-aware routing had the higher hit rate on all 3 seeds (mean 54.8% vs 27.0%), prefilled 38% fewer prompt tokens, cut the cold-request share from 67% to 32%, and halved median TTFT. With the default configuration the gap was 6.6 points (72.7% vs 79.3%). Cache-aware routing therefore matters much more when per-replica cache is scarce.
+- Disabling the flag cut round-robin's hit rate from 72.7% to 27.0%, so the default configuration was retaining far more than the 4 slots. This matches the host-memory prompt cache added in llama.cpp PR #16391; the server logs were not checked.
+- My prediction before running was that prefix-aware would stay near 79%. It averaged 54.8% and varied from 39.5% to 67.9% across seeds. A possible cause (not measured) is that seeds change how the 12 prompts spread over the replicas, and an uneven split overflows the 4 slots on some replica. With 3 seeds the spread is not explained.
+- p95 TTFT is about equal (4063 vs 4084 ms) because both policies have more than 5% cold requests, so the p95 lands among cold requests in both.
+
+Data-quality notes:
+
+- The first prefix-aware seed-2 run took about 3 hours of wall-clock time (result files written at 12:23 and 15:25) and had 2 requests hit the replay client's 180 s timeout. Windows Kernel-Power events at 12:26 and 15:23 (which I believe mark entering and leaving Modern Standby) match the gap, so I attribute the stall to laptop sleep. The run was repeated with sleep disabled; it ran normally and reproduced the earlier numbers (hit rate 56.9% vs 56.5%, 228 vs 231 prompt tokens prefilled), and the repeated run is the one reported above.
+- One round-robin request (seed 1, 12:10, before the standby period) also hit the 180 s client timeout; its cause is unknown, and that run's 99 measured requests are reported as is.
+- In one run the gateway logged one connection EOF from a replica, retried the request successfully, and the replica was healthy again 2 seconds later. A possible cause is a stale keep-alive connection: llama-server's keep-alive timeout appears to be 5 s while the gateway keeps idle connections for 90 s. Not verified.

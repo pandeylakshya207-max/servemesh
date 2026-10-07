@@ -13,13 +13,13 @@ A cache-aware, fault-tolerant gateway for LLM serving, written in Go. It sits in
 
 ## Results
 
-**Real engine (llama.cpp, Qwen2.5-0.5B, 3 CPU replicas, sequential client, 5 seeds):** prefix-aware routing raised the prefix-cache hit rate from about 71.5% to 78.8% on every paired seed, cut prompt tokens prefilled by 26%, and cut p95 time-to-first-token by 71% (cold requests fell from 10.5% to 1.1%). Median TTFT was unchanged. This is a modest, real gain.
+**Real engine (llama.cpp, Qwen2.5-0.5B, 3 CPU replicas, sequential client, 5 seeds):** prefix-aware routing raised the prefix-cache hit rate from about 71.5% to 78.8% on every paired seed, cut prompt tokens prefilled by 26%, and cut p95 time-to-first-token by 71% (cold requests fell from 10.5% to 1.1%). Median TTFT was unchanged. This is a modest, real gain with llama-server's default host-memory prompt cache; with that cache disabled the hit-rate gain was much larger (27.0% to 54.8%, 3 seeds).
 
 **Simulation:** in a mock-replica simulator prefix-aware routing looked much stronger (hit rate from about 28% to 65-73%). That did not carry over to the real engine, whose cache retained far more than the simulator's did, so treat the simulated numbers as design exploration, not predictions.
 
 A backend killed under load failed only the 3 of 400 requests already streaming from it (simulator).
 
-Full tables, caveats and limitations: [docs/RESULTS.md](docs/RESULTS.md). Not yet tested: GPUs, vLLM, concurrent load on real replicas, more prompt groups than fit in cache.
+Full tables, caveats and limitations: [docs/RESULTS.md](docs/RESULTS.md). Not yet tested: GPUs, vLLM, concurrent load on real replicas.
 
 ## Quick start
 
