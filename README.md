@@ -4,6 +4,32 @@
 
 A cache-aware, fault-tolerant gateway for LLM serving, written in Go. It sits in front of several model replicas, exposes an OpenAI-style streaming API, and decides which replica serves each request.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    client["Clients<br/>OpenAI-style streaming requests"]
+    subgraph gw["servemesh gateway"]
+        proxy["Streaming proxy<br/>SSE passthrough, error event if a stream breaks"]
+        policy["Routing policy<br/>round-robin, least-loaded, prefix-aware"]
+        retry["Retry before the first byte<br/>stale-connection retry, 504 on slow backends"]
+        health["Health checker<br/>active probes plus passive ejection"]
+    end
+    r0["Replica 0"]
+    r1["Replica 1"]
+    r2["Replica 2"]
+    client --> proxy
+    proxy --> policy
+    policy --> retry
+    retry --> r0
+    retry --> r1
+    retry --> r2
+    health -.-> r0
+    health -.-> r1
+    health -.-> r2
+```
+
+How a request flows: the gateway reads the prompt, the routing policy picks a replica (the pick and the slot reservation are one atomic step), and the response is streamed back as it arrives. If a replica cannot be reached before the first byte, the request is retried on a different replica; if a replica fails after the first byte, the client receives an explicit error event instead of a silently truncated stream. A replica that is slow but alive gets a 504 and is not ejected, because retrying onto an overloaded cluster adds load. Health checks run in the background and eject or restore replicas.
 ## Features
 
 - Streaming reverse proxy for `/v1/chat/completions` (SSE).
