@@ -175,6 +175,8 @@ func main() {
 	maxTokens := flag.Int("max-tokens", 32, "max_tokens per request")
 	seed := flag.Int64("seed", 1, "random seed")
 	label := flag.String("label", "", "label stored in the results")
+	sendPriority := flag.String("send-priority", "", "if set, send this X-Priority on every request while still tracking classes separately (a cap without priorities)")
+	slo := flag.Duration("slo-ttft", time.Second, "first-token latency target for the 'served within target' lines")
 	out := flag.String("out", "", "write a JSON summary to this path")
 	flag.Parse()
 
@@ -216,7 +218,11 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			status, ttft, e2e := send(client, *url, class, body)
+			prio := class
+			if *sendPriority != "" {
+				prio = *sendPriority
+			}
+			status, ttft, e2e := send(client, *url, prio, body)
 			mu.Lock()
 			samples = append(samples, sample{class: class, start: sentAt.Sub(start), ttft: ttft, e2e: e2e, status: status})
 			mu.Unlock()
@@ -245,6 +251,11 @@ func main() {
 			row.st.TTFTp50, row.st.TTFTp95, row.st.TTFTp99, row.st.E2Ep50, row.st.E2Ep95)
 	}
 
+	for _, c := range []string{"high", "low"} {
+		good, total := withinSLO(measured, c, *slo)
+		fmt.Printf("%s: %d of %d requests got a first token within %v (%.1f%%)\n", c, good, total, *slo, 100*float64(good)/math.Max(1, float64(total)))
+	}
+
 	if *out != "" {
 		if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -257,4 +268,18 @@ func main() {
 		}
 		fmt.Println("wrote", *out)
 	}
+}
+
+// withinSLO counts requests of a class that were served with a first token within slo.
+func withinSLO(samples []sample, class string, slo time.Duration) (good, total int) {
+	for _, s := range samples {
+		if s.class != class {
+			continue
+		}
+		total++
+		if s.status == "ok" && s.ttft <= slo {
+			good++
+		}
+	}
+	return good, total
 }

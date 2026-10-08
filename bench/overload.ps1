@@ -6,7 +6,8 @@ param(
   [string]$Duration = "40s",
   [string]$Warmup = "10s",
   [int]$Seed = 1,
-  [double]$HighFrac = 0.2
+  [double]$HighFrac = 0.2,
+  [string]$SendPriority = ""
 )
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
@@ -19,6 +20,7 @@ go build -o bin/overload.exe ./cmd/overload
 
 $Label = "noadm"
 if ($MaxInflight -gt 0) { $Label = "adm$MaxInflight" }
+if ($SendPriority -ne "") { $Label = "$Label-flat" }
 
 foreach ($port in 8080, 9000, 9001, 9002) {
   if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) {
@@ -55,7 +57,7 @@ try {
   $procs += $gw
   if (-not (Wait-Ready $gw "http://127.0.0.1:8080/healthz" 15)) { throw "gateway did not become ready; see $gwErr" }
 
-  .\bin\overload.exe -url http://127.0.0.1:8080 -rps $Rps -duration $Duration -warmup $Warmup -high-frac $HighFrac -seed $Seed -label $Label -out "bench/results/overload-$Label-rps$Rps-s$Seed.json"
+  .\bin\overload.exe -url http://127.0.0.1:8080 -rps $Rps -duration $Duration -warmup $Warmup -high-frac $HighFrac -seed $Seed -send-priority=$SendPriority -label $Label -out "bench/results/overload-$Label-rps$Rps-s$Seed.json"
 
   if ($gw.HasExited) { Write-Warning "gateway exited during the run; discard this result" }
   $m = (Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:8080/metrics).Content
