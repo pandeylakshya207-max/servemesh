@@ -18,6 +18,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/pandeylakshya207-max/servemesh/internal/admission"
 	"github.com/pandeylakshya207-max/servemesh/internal/router"
 )
 
@@ -48,6 +49,9 @@ type Gateway struct {
 	pickMu sync.Mutex
 
 	metrics *metrics
+
+	// admit limits concurrent requests and sheds load; disabled unless SetAdmission is called.
+	admit *admission.Controller
 }
 
 func New(policy router.Policy, backends []*router.Backend) *Gateway {
@@ -69,6 +73,7 @@ func New(policy router.Policy, backends []*router.Backend) *Gateway {
 		}},
 		mux: http.NewServeMux(),
 	}
+	g.admit = admission.New(admission.Config{})
 	g.metrics = newMetrics(g)
 	g.mux.HandleFunc("POST /v1/chat/completions", g.handleChat)
 	g.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -157,6 +162,21 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		Model:  cr.Model,
 		Prompt: sb.String(),
 	}
+
+	prio := admission.ParsePriority(r.Header.Get("X-Priority"))
+	waitStart := time.Now()
+	release, aerr := g.admit.Acquire(r.Context(), prio)
+	if aerr != nil {
+		if r.Context().Err() != nil {
+			return // the client left while waiting; recorded as 499
+		}
+		g.metrics.shed.WithLabelValues(prio.String(), admission.Reason(aerr)).Inc()
+		rec.Header().Set("Retry-After", "1")
+		http.Error(rec, "server busy: request shed", http.StatusTooManyRequests)
+		return
+	}
+	defer release()
+	g.metrics.admitWait.Observe(time.Since(waitStart).Seconds())
 
 	tried := make(map[*router.Backend]bool)
 	attempts := 0
@@ -356,3 +376,6 @@ func (g *Gateway) handleBackends(w http.ResponseWriter, _ *http.Request) {
 		"stale_conn_retries": g.staleRetries.Load(),
 	})
 }
+
+// SetAdmission enables admission control (load shedding). Call it before serving.
+func (g *Gateway) SetAdmission(cfg admission.Config) { g.admit = admission.New(cfg) }

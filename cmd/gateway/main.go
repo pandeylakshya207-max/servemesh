@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pandeylakshya207-max/servemesh/internal/admission"
 	"github.com/pandeylakshya207-max/servemesh/internal/proxy"
 	"github.com/pandeylakshya207-max/servemesh/internal/router"
 )
@@ -61,6 +62,9 @@ func main() {
 	healthPath := flag.String("health-path", "/healthz", "health endpoint path on the backends (llama-server uses /health)")
 	maxAttempts := flag.Int("max-attempts", 3, "max backends tried per request before the first response byte")
 	headerTimeout := flag.Duration("header-timeout", 30*time.Second, "how long to wait for a backend to start responding (raise for CPU-bound or queueing backends)")
+	maxInflight := flag.Int("max-inflight", 0, "admission control: max concurrent requests across all backends (0 = off)")
+	maxQueue := flag.Int("max-queue", 64, "admission control: max requests waiting for a slot")
+	queueWait := flag.Duration("queue-wait", 2*time.Second, "admission control: wait budget for normal priority (high gets 2x, low gets 0.5x)")
 	flag.Parse()
 
 	backends, err := parseBackends(*backendsFlag)
@@ -75,6 +79,14 @@ func main() {
 	gw := proxy.New(policy, backends)
 	gw.MaxAttempts = *maxAttempts
 	gw.SetResponseHeaderTimeout(*headerTimeout)
+	if *maxInflight > 0 {
+		gw.SetAdmission(admission.Config{
+			MaxInFlight: *maxInflight,
+			MaxQueue:    *maxQueue,
+			MaxWait:     [3]time.Duration{2 * *queueWait, *queueWait, *queueWait / 2},
+		})
+		log.Printf("admission control on: max in-flight %d, max queue %d, wait budget %v (normal)", *maxInflight, *maxQueue, *queueWait)
+	}
 	if *healthInterval > 0 {
 		hc := proxy.NewHealthChecker(backends, *healthInterval, *healthTimeout)
 		hc.Path = *healthPath

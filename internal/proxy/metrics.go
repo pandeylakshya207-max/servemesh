@@ -37,6 +37,8 @@ type metrics struct {
 	requests   *prometheus.CounterVec
 	firstChunk *prometheus.HistogramVec
 	pick       prometheus.Histogram
+	shed       *prometheus.CounterVec
+	admitWait  prometheus.Histogram
 }
 
 var (
@@ -81,8 +83,17 @@ func newMetrics(g *Gateway) *metrics {
 		Help:    "Time spent choosing and reserving a backend, including waiting for the pick lock.",
 		Buckets: []float64{0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1},
 	})
+	m.shed = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "servemesh_shed_total",
+		Help: "Requests rejected by admission control with 429, by priority class and reason.",
+	}, []string{"priority", "reason"})
+	m.admitWait = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name:    "servemesh_admission_wait_seconds",
+		Help:    "Time an admitted request spent waiting for admission.",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5},
+	})
 	m.reg.MustRegister(
-		m.requests, m.firstChunk, m.pick,
+		m.requests, m.firstChunk, m.pick, m.shed, m.admitWait,
 		prometheus.NewCounterFunc(prometheus.CounterOpts{
 			Name: "servemesh_retries_total", Help: "Requests retried on a different backend before the first byte.",
 		}, func() float64 { return float64(g.retries.Load()) }),
@@ -95,6 +106,12 @@ func newMetrics(g *Gateway) *metrics {
 		prometheus.NewCounterFunc(prometheus.CounterOpts{
 			Name: "servemesh_stale_conn_retries_total", Help: "Requests retried on a fresh connection after a stale pooled connection.",
 		}, func() float64 { return float64(g.staleRetries.Load()) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "servemesh_admission_queue_depth", Help: "Requests currently waiting for admission (0 when admission control is off).",
+		}, func() float64 { return float64(g.admit.Queued()) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "servemesh_admission_in_flight", Help: "Requests currently admitted (0 when admission control is off).",
+		}, func() float64 { return float64(g.admit.InFlight()) }),
 		&backendCollector{g: g},
 	)
 	return m
