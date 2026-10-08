@@ -231,3 +231,63 @@ Data-quality notes:
 - The first prefix-aware seed-2 run took about 3 hours of wall-clock time (result files written at 12:23 and 15:25) and had 2 requests hit the replay client's 180 s timeout. Windows Kernel-Power events at 12:26 and 15:23 (which I believe mark entering and leaving Modern Standby) match the gap, so I attribute the stall to laptop sleep. The run was repeated with sleep disabled; it ran normally and reproduced the earlier numbers (hit rate 56.9% vs 56.5%, 228 vs 231 prompt tokens prefilled), and the repeated run is the one reported above.
 - One round-robin request (seed 1, 12:10, before the standby period) also hit the 180 s client timeout; its cause is unknown, and that run's 99 measured requests are reported as is.
 - In one run the gateway logged one connection EOF from a replica, retried the request successfully, and the replica was healthy again 2 seconds later. A possible cause is a stale keep-alive connection: llama-server's keep-alive timeout appears to be 5 s while the gateway kept idle connections for 90 s. This was not confirmed against the real race. The gateway now keeps idle connections for 4 s and retries once on a fresh connection when a reused connection dies before any response byte (counted as `stale_conn_retries` in `/backends`); a unit test simulates the race, but the real one has not been reproduced.
+
+## Admission control under overload
+
+Question: when offered load exceeds what the backends can serve, does admission control (a cap on in-flight requests, a bounded queue, and per-priority wait budgets) keep high-priority requests fast, and what does it cost?
+
+### Setup
+
+- 3 mock backends behind the gateway, least-loaded routing in every run.
+- Open-loop load from `cmd/overload`: Poisson arrivals at a fixed rate, 20% of requests sent with `X-Priority: high` and 80% with `low`, unique 50-word prompts, `max_tokens=32`, streaming.
+- Each run lasts 40 s. The first 10 s are warmup and are excluded, leaving a 30 s window. Seed 1 throughout, so every setting at a given rate sees the same arrivals.
+- Settings:
+  - `noadm`: admission off. The gateway ignores `X-Priority`.
+  - `adm24`, `adm48`: at most 24 or 48 requests in flight in total, a queue of 32, and wait budgets of 2 s for high, 1 s for normal and 0.5 s for low priority.
+  - `adm24-flat`, `adm48-flat`: the same caps, but every request is sent as `normal`. This control separates the effect of the cap from the effect of priorities.
+- "Within 1 s" means the request was served and its first token arrived within 1 s of being sent. Shed requests and late requests both count as misses.
+- Reproduce with `bench/overload.ps1 -Rps <rate> [-MaxInflight <cap>] [-SendPriority normal]`.
+
+### Results
+
+TTFT percentiles cover served requests only.
+
+50 rps (310 high and 1224 low requests in the window):
+
+| Setting | High served | High TTFT p50 / p95 (ms) | High within 1 s | Low served | Low TTFT p50 / p95 (ms) | Low within 1 s | All within 1 s |
+|---|---|---|---|---|---|---|---|
+| noadm | 310 of 310 | 393 / 439 | 100% | 1224 of 1224 | 392 / 438 | 100% | 100% |
+| adm24 | 310 of 310 | 222 / 304 | 100% | 674 of 1224 | 647 / 689 | 55.1% | 64.1% |
+| adm24-flat | 182 of 310 | 1048 / 1173 | 18.4% | 798 of 1224 | 1035 / 1170 | 20.8% | 20.3% |
+| adm48 | 310 of 310 | 296 / 339 | 100% | 1028 of 1223 | 703 / 774 | 84.1% | 87.3% |
+| adm48-flat | 275 of 310 | 922 / 1025 | 80.3% | 1063 of 1224 | 921 / 1014 | 79.0% | 79.3% |
+
+80 rps (474 high and 1977 low requests in the window):
+
+| Setting | High served | High TTFT p50 / p95 (ms) | High within 1 s | Low served | Low TTFT p50 / p95 (ms) | Low within 1 s | All within 1 s |
+|---|---|---|---|---|---|---|---|
+| noadm | 474 of 474 | 2974 / 4085 | 0% | 1977 of 1977 | 2979 / 4065 | 0% | 0% |
+| adm24 | 474 of 474 | 319 / 511 | 100% | 511 of 1977 | 598 / 687 | 25.8% | 40.2% |
+| adm24-flat | 174 of 474 | 974 / 1138 | 21.9% | 810 of 1977 | 971 / 1120 | 25.1% | 24.5% |
+| adm48 | 474 of 474 | 314 / 473 | 100% | 876 of 1977 | 717 / 776 | 44.3% | 55.1% |
+| adm48-flat | 262 of 474 | 987 / 1138 | 28.7% | 1080 of 1977 | 1020 / 1145 | 25.7% | 26.3% |
+
+At 20 rps, below saturation, `noadm` and `adm24` were indistinguishable: all 639 requests served, nothing shed, p99 TTFT under 200 ms in both.
+
+### What the numbers show
+
+1. Below saturation, admission control is invisible. It costs nothing at 20 rps.
+2. Past saturation, no admission fails everyone. At 80 rps every request completed, but none got a first token within 1 s. Median TTFT was 3.0 s and median end-to-end time was 11.3 s.
+3. Priorities, not the cap, protect the high class. With priorities, every high-priority request was served within 1 s at both rates and both caps (p99 TTFT at most 560 ms). With the same caps and no priorities, 11% to 63% of high-priority requests were shed, and those that were served waited about 1 s for a first token.
+4. A cap without priorities did poorly here. Under sustained overload its queue stays full, so served requests wait close to the full 1 s budget. Only 20% to 26% of all requests met the target in three of the four flat runs (79% in the fourth, cap 48 at 50 rps).
+5. The price is shed low-priority work. At 80 rps, 74% of low-priority requests were shed with cap 24 and 56% with cap 48. The low-priority requests that were served stayed bounded (p99 TTFT 691 ms and 780 ms).
+6. The cap matters and neither value was calibrated. Cap 48 beat cap 24 at both rates on requests served within 1 s (87.3% vs 64.1% at 50 rps, 55.1% vs 40.2% at 80 rps) with no loss in high-priority TTFT. At 50 rps the backends served everything within 1 s with no admission at all, so both caps shed work for nothing there (45% and 16% of low-priority requests). A cap should be set from measured capacity, which this experiment did not do.
+
+### Limits
+
+- The mock backends slow down linearly with concurrency (10% per extra in-flight request), so a concurrency cap is bound to help them. This shows the mechanism and the trade-off, not how a real inference engine behaves.
+- One seed and one 30 s window per setting, with the load generator, gateway and backends sharing one Windows laptop. As a guide to noise: the `noadm` settings were run three times and their TTFT percentiles agreed within 1%; `adm24` was run twice and its high-priority median TTFT differed by up to 15% (277 vs 319 ms at 80 rps). Treat differences under about 20% as noise.
+- The flat-cap "within 1 s" figures are fragile. The normal wait budget is 1 s, the same as the target, so served requests land on both sides of it and a slightly looser target would raise those figures a lot. The share of high-priority requests shed under a flat cap does not depend on the target.
+- At 80 rps without admission, an 11 s median end-to-end time in a 40 s run suggests latency was still growing when the run ended. Those figures describe this run length, not a steady state.
+- High-priority traffic was 20% of the load, which fits under both caps by itself. Whether priorities still protect it when high-priority traffic alone exceeds capacity was not tested.
+- Only two caps, one queue size and one set of wait budgets were tried.

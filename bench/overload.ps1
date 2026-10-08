@@ -57,7 +57,7 @@ try {
   $procs += $gw
   if (-not (Wait-Ready $gw "http://127.0.0.1:8080/healthz" 15)) { throw "gateway did not become ready; see $gwErr" }
 
-  .\bin\overload.exe -url http://127.0.0.1:8080 -rps $Rps -duration $Duration -warmup $Warmup -high-frac $HighFrac -seed $Seed -send-priority=$SendPriority -label $Label -out "bench/results/overload-$Label-rps$Rps-s$Seed.json"
+  .\bin\overload.exe -url http://127.0.0.1:8080 -rps $Rps -duration $Duration -warmup $Warmup -high-frac $HighFrac -seed $Seed "-send-priority=$SendPriority" -label $Label -out "bench/results/overload-$Label-rps$Rps-s$Seed.json" | Tee-Object -FilePath "bench/results/overload-$Label-rps$Rps-s$Seed.txt"
 
   if ($gw.HasExited) { Write-Warning "gateway exited during the run; discard this result" }
   $m = (Invoke-WebRequest -UseBasicParsing -Uri http://127.0.0.1:8080/metrics).Content
