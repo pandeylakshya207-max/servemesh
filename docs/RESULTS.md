@@ -240,54 +240,55 @@ Question: when offered load exceeds what the backends can serve, does admission 
 
 - 3 mock backends behind the gateway, least-loaded routing in every run.
 - Open-loop load from `cmd/overload`: Poisson arrivals at a fixed rate, 20% of requests sent with `X-Priority: high` and 80% with `low`, unique 50-word prompts, `max_tokens=32`, streaming.
-- Each run lasts 40 s. The first 10 s are warmup and are excluded, leaving a 30 s window. Seed 1 throughout, so every setting at a given rate sees the same arrivals.
+- Each run lasts 40 s. The first 10 s are warmup and are excluded, leaving a 30 s window.
+- Seeds 1, 2 and 3. Every setting at a given rate and seed sees the same arrivals.
 - Settings:
   - `noadm`: admission off. The gateway ignores `X-Priority`.
   - `adm24`, `adm48`: at most 24 or 48 requests in flight in total, a queue of 32, and wait budgets of 2 s for high, 1 s for normal and 0.5 s for low priority.
   - `adm24-flat`, `adm48-flat`: the same caps, but every request is sent as `normal`. This control separates the effect of the cap from the effect of priorities.
 - "Within 1 s" means the request was served and its first token arrived within 1 s of being sent. Shed requests and late requests both count as misses.
-- Reproduce with `bench/overload.ps1 -Rps <rate> [-MaxInflight <cap>] [-SendPriority normal]`.
+- Reproduce with `bench/overload.ps1 -Rps <rate> -Seed <n> [-MaxInflight <cap>] [-SendPriority normal]`.
 
-### Results
+### Results (3 seeds)
 
-TTFT percentiles cover served requests only.
+Served and "within 1 s" percentages are pooled over the three seeds. TTFT figures are the mean of the per-seed percentiles and cover served requests only. The last column also gives the lowest and highest single-seed value.
 
-50 rps (310 high and 1224 low requests in the window):
+50 rps (917 high and 3737 low requests across the three windows):
 
-| Setting | High served | High TTFT p50 / p95 (ms) | High within 1 s | Low served | Low TTFT p50 / p95 (ms) | Low within 1 s | All within 1 s |
+| Setting | High served | High TTFT p50 / p95 (ms) | High within 1 s | Low served | Low TTFT p50 / p95 (ms) | Low within 1 s | All within 1 s (seed range) |
 |---|---|---|---|---|---|---|---|
-| noadm | 310 of 310 | 393 / 439 | 100% | 1224 of 1224 | 392 / 438 | 100% | 100% |
-| adm24 | 310 of 310 | 222 / 304 | 100% | 674 of 1224 | 647 / 689 | 55.1% | 64.1% |
-| adm24-flat | 182 of 310 | 1048 / 1173 | 18.4% | 798 of 1224 | 1035 / 1170 | 20.8% | 20.3% |
-| adm48 | 310 of 310 | 296 / 339 | 100% | 1028 of 1223 | 703 / 774 | 84.1% | 87.3% |
-| adm48-flat | 275 of 310 | 922 / 1025 | 80.3% | 1063 of 1224 | 921 / 1014 | 79.0% | 79.3% |
+| noadm | 100% | 400 / 464 | 100% | 100% | 397 / 464 | 100% | 100% (all seeds) |
+| adm24 | 100% | 224 / 339 | 100% | 54.7% | 648 / 688 | 54.7% | 63.6% (61.0 to 66.0) |
+| adm24-flat | 61.1% | 1057 / 1167 | 14.7% | 63.9% | 1051 / 1170 | 14.9% | 14.9% (4.6 to 20.5) |
+| adm48 | 100% | 298 / 341 | 100% | 83.9% | 682 / 773 | 83.9% | 87.1% (83.3 to 91.0) |
+| adm48-flat | 87.7% | 900 / 1036 | 77.1% | 86.9% | 899 / 1029 | 78.1% | 77.9% (71.4 to 83.5) |
 
-80 rps (474 high and 1977 low requests in the window):
+80 rps (1470 high and 5874 low requests across the three windows):
 
-| Setting | High served | High TTFT p50 / p95 (ms) | High within 1 s | Low served | Low TTFT p50 / p95 (ms) | Low within 1 s | All within 1 s |
+| Setting | High served | High TTFT p50 / p95 (ms) | High within 1 s | Low served | Low TTFT p50 / p95 (ms) | Low within 1 s | All within 1 s (seed range) |
 |---|---|---|---|---|---|---|---|
-| noadm | 474 of 474 | 2974 / 4085 | 0% | 1977 of 1977 | 2979 / 4065 | 0% | 0% |
-| adm24 | 474 of 474 | 319 / 511 | 100% | 511 of 1977 | 598 / 687 | 25.8% | 40.2% |
-| adm24-flat | 174 of 474 | 974 / 1138 | 21.9% | 810 of 1977 | 971 / 1120 | 25.1% | 24.5% |
-| adm48 | 474 of 474 | 314 / 473 | 100% | 876 of 1977 | 717 / 776 | 44.3% | 55.1% |
-| adm48-flat | 262 of 474 | 987 / 1138 | 28.7% | 1080 of 1977 | 1020 / 1145 | 25.7% | 26.3% |
+| noadm | 100% | 2996 / 3968 | 0% | 100% | 2945 / 3959 | 0% | 0% (all seeds) |
+| adm24 | 100% | 323 / 529 | 100% | 25.1% | 611 / 687 | 25.1% | 40.1% (39.9 to 40.3) |
+| adm24-flat | 39.5% | 952 / 1112 | 23.8% | 40.3% | 950 / 1107 | 24.6% | 24.5% (21.8 to 27.0) |
+| adm48 | 100% | 309 / 468 | 100% | 43.9% | 731 / 778 | 43.9% | 55.1% (55.1 to 55.2) |
+| adm48-flat | 55.1% | 985 / 1122 | 29.5% | 54.8% | 1005 / 1131 | 27.5% | 27.9% (26.3 to 31.0) |
 
-At 20 rps, below saturation, `noadm` and `adm24` were indistinguishable: all 639 requests served, nothing shed, p99 TTFT under 200 ms in both.
+At 20 rps, below saturation, `noadm` and `adm24` were indistinguishable (seed 1 only): all 639 requests served, nothing shed, p99 TTFT under 200 ms in both.
 
 ### What the numbers show
 
 1. Below saturation, admission control is invisible. It costs nothing at 20 rps.
-2. Past saturation, no admission fails everyone. At 80 rps every request completed, but none got a first token within 1 s. Median TTFT was 3.0 s and median end-to-end time was 11.3 s.
-3. Priorities, not the cap, protect the high class. With priorities, every high-priority request was served within 1 s at both rates and both caps (p99 TTFT at most 560 ms). With the same caps and no priorities, 11% to 63% of high-priority requests were shed, and those that were served waited about 1 s for a first token.
-4. A cap without priorities did poorly here. Under sustained overload its queue stays full, so served requests wait close to the full 1 s budget. Only 20% to 26% of all requests met the target in three of the four flat runs (79% in the fourth, cap 48 at 50 rps).
-5. The price is shed low-priority work. At 80 rps, 74% of low-priority requests were shed with cap 24 and 56% with cap 48. The low-priority requests that were served stayed bounded (p99 TTFT 691 ms and 780 ms).
-6. The cap matters and neither value was calibrated. Cap 48 beat cap 24 at both rates on requests served within 1 s (87.3% vs 64.1% at 50 rps, 55.1% vs 40.2% at 80 rps) with no loss in high-priority TTFT. At 50 rps the backends served everything within 1 s with no admission at all, so both caps shed work for nothing there (45% and 16% of low-priority requests). A cap should be set from measured capacity, which this experiment did not do.
+2. Past saturation, no admission fails everyone. At 80 rps every request completed, but none got a first token within 1 s in any seed. Median TTFT was about 3 s (2.5 to 3.4 s across seeds) and median end-to-end time was 10.3 to 12.6 s.
+3. Priorities, not the cap, protect the high class. With priorities, all 2387 high-priority requests in the twelve priority runs were served within 1 s (p99 TTFT at most 570 ms). With the same caps and no priorities, 12% to 61% of high-priority requests were shed depending on the setting, and those that were served waited about 1 s for a first token.
+4. A cap without priorities did poorly here. Under sustained overload its queue stays full, so served requests wait close to the full 1 s budget. Only 15% to 28% of all requests met the target in three of the four flat settings (78% in the fourth, cap 48 at 50 rps).
+5. The price is shed low-priority work. At 80 rps, 75% of low-priority requests were shed with cap 24 and 56% with cap 48. The low-priority requests that were served stayed bounded (p99 TTFT at most 692 ms and 781 ms).
+6. The cap matters and neither value was calibrated. Cap 48 beat cap 24 on requests served within 1 s at both rates and in every seed (87.1% vs 63.6% at 50 rps, 55.1% vs 40.1% at 80 rps) with no loss in high-priority TTFT. At 50 rps the backends served everything within 1 s with no admission at all, so both caps shed work for nothing there (45% and 16% of low-priority requests). A cap should be set from measured capacity, which this experiment did not do.
 
 ### Limits
 
 - The mock backends slow down linearly with concurrency (10% per extra in-flight request), so a concurrency cap is bound to help them. This shows the mechanism and the trade-off, not how a real inference engine behaves.
-- One seed and one 30 s window per setting, with the load generator, gateway and backends sharing one Windows laptop. As a guide to noise: the `noadm` settings were run three times and their TTFT percentiles agreed within 1%; `adm24` was run twice and its high-priority median TTFT differed by up to 15% (277 vs 319 ms at 80 rps). Treat differences under about 20% as noise.
-- The flat-cap "within 1 s" figures are fragile. The normal wait budget is 1 s, the same as the target, so served requests land on both sides of it and a slightly looser target would raise those figures a lot. The share of high-priority requests shed under a flat cap does not depend on the target.
-- At 80 rps without admission, an 11 s median end-to-end time in a 40 s run suggests latency was still growing when the run ended. Those figures describe this run length, not a steady state.
+- Three seeds with one 30 s window each, and the load generator, gateway and backends share one Windows laptop. The seed ranges in the tables show the spread. Seeds also differ in realized load (1500 to 1620 requests per window at a nominal 50 rps), which moved the `noadm` median TTFT at 50 rps between 348 and 459 ms.
+- The flat-cap "within 1 s" figures are fragile. The normal wait budget is 1 s, the same as the target, so served requests land on both sides of it: at cap 24 and 50 rps the figure ranged from 4.6% to 20.5% across seeds. The share of high-priority requests shed under a flat cap does not depend on the target.
+- At 80 rps without admission, a median end-to-end time above 10 s in a 40 s run suggests latency was still growing when the run ended. Those figures describe this run length, not a steady state.
 - High-priority traffic was 20% of the load, which fits under both caps by itself. Whether priorities still protect it when high-priority traffic alone exceeds capacity was not tested.
 - Only two caps, one queue size and one set of wait budgets were tried.

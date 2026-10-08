@@ -35,6 +35,7 @@ How a request flows: the gateway reads the prompt, the routing policy picks a re
 - Streaming reverse proxy for `/v1/chat/completions` (SSE).
 - Pluggable routing policies: round-robin, least-loaded, and prefix-aware (routes to the replica most likely to hold the prompt's prefix in its KV cache, with a bounded-load cap and a choice of cold-prefix placement).
 - Active and passive health checking, retry on a different replica before the first byte, explicit error events when a stream fails midway, and a configurable response-header timeout that returns 504 for slow backends without ejecting them.
+- Priority-aware admission control (`-max-inflight`, `-max-queue`, `-queue-wait`): a cap on in-flight requests, a bounded queue, per-priority wait budgets taken from the `X-Priority` header, and load shedding with HTTP 429.
 - A mock replica with a simulated prefix cache, an open-loop (Poisson) benchmark harness, and a sequential replay tool that reads real cache counters from llama.cpp.
 
 ## Results
@@ -44,6 +45,8 @@ How a request flows: the gateway reads the prompt, the routing policy picks a re
 **Simulation:** in a mock-replica simulator prefix-aware routing looked much stronger (hit rate from about 28% to 65-73%). That did not carry over to the real engine, whose cache retained far more than the simulator's did, so treat the simulated numbers as design exploration, not predictions.
 
 A backend killed under load failed only the 3 of 400 requests already streaming from it (simulator).
+
+**Admission control (simulator, 3 seeds):** at 80 rps, well past saturation for three mock replicas, no request got a first token within 1 s without admission control. With a cap of 48 in-flight requests and priorities, every high-priority request did (p95 TTFT about 470 ms), at the cost of shedding 56% of low-priority requests. The same cap without priorities shed 45% of high-priority requests, so the protection comes from the priorities, not the cap. The caps were not calibrated: at 50 rps, where the mock needed no admission control, they shed 16% to 45% of low-priority traffic for nothing.
 
 Full tables, caveats and limitations: [docs/RESULTS.md](docs/RESULTS.md). Not yet tested: GPUs, vLLM, concurrent load on real replicas.
 
