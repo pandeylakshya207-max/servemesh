@@ -61,6 +61,18 @@ go build -o bin/gateway.exe ./cmd/gateway
 
 For real llama-server replicas, add `-health-path=/health` and see `bench/replay-llama.ps1`.
 
+## Run with Docker
+
+    docker compose up -d --build     # gateway on :8080 in front of three mock replicas
+    curl.exe http://localhost:8080/backends
+    curl.exe http://localhost:8080/metrics
+    docker compose down
+
+CI builds both images on every push. Metrics are served at `/metrics` (request counts by backend and status, first-chunk latency, pick latency, per-backend in-flight and health).
+
+## Kubernetes
+
+`deploy/k8s/servemesh.yaml` runs three mock replicas as a StatefulSet and the gateway as a single-replica Deployment (its prefix tracker lives in the process, so more gateway replicas would not share state). The manifest has not been applied to a real cluster yet.
 ## Layout
 
 - `internal/router`: routing policies

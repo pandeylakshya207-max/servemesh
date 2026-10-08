@@ -1,0 +1,111 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock
+  labels:
+    app: mock
+spec:
+  clusterIP: None
+  selector:
+    app: mock
+  ports:
+    - name: http
+      port: 9000
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mock
+spec:
+  serviceName: mock
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: mock
+  template:
+    metadata:
+      labels:
+        app: mock
+    spec:
+      containers:
+        - name: mock
+          image: servemesh-mockbackend:dev
+          imagePullPolicy: IfNotPresent
+          args: ["-id=$(POD_NAME)", "-addr=:9000", "-cache-blocks=150"]
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - containerPort: 9000
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9000
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: /metrics
+    spec:
+      containers:
+        - name: gateway
+          image: servemesh-gateway:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - -policy=prefix-aware
+            - -cold-fallback=least-loaded
+            - -prefix-cache-blocks=150
+            - -backends=mock-0=mock-0.mock:9000,mock-1=mock-1.mock:9000,mock-2=mock-2.mock:9000
+            - -addr=:8080
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+spec:
+  selector:
+    app: gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
