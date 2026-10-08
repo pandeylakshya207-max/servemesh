@@ -1,0 +1,21 @@
+services:
+  mock0:
+    build: { context: ., target: mockbackend }
+    command: ["-id=m0", "-addr=:9000", "-cache-blocks=150"]
+  mock1:
+    build: { context: ., target: mockbackend }
+    command: ["-id=m1", "-addr=:9000", "-cache-blocks=150"]
+  mock2:
+    build: { context: ., target: mockbackend }
+    command: ["-id=m2", "-addr=:9000", "-cache-blocks=150"]
+  gateway:
+    build: { context: ., target: gateway }
+    command:
+      - "-policy=prefix-aware"
+      - "-cold-fallback=least-loaded"
+      - "-prefix-cache-blocks=150"
+      - "-backends=m0=mock0:9000,m1=mock1:9000,m2=mock2:9000"
+      - "-addr=:8080"
+    ports:
+      - "8080:8080"
+    depends_on: [mock0, mock1, mock2]
