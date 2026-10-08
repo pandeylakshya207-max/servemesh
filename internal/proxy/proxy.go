@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/pandeylakshya207-max/servemesh/internal/router"
 )
 
@@ -44,6 +46,8 @@ type Gateway struct {
 	// pickMu makes choosing a backend and reserving a slot on it one atomic step,
 	// so simultaneous requests cannot all pick the same least-loaded backend.
 	pickMu sync.Mutex
+
+	metrics *metrics
 }
 
 func New(policy router.Policy, backends []*router.Backend) *Gateway {
@@ -65,11 +69,13 @@ func New(policy router.Policy, backends []*router.Backend) *Gateway {
 		}},
 		mux: http.NewServeMux(),
 	}
+	g.metrics = newMetrics(g)
 	g.mux.HandleFunc("POST /v1/chat/completions", g.handleChat)
 	g.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
 	g.mux.HandleFunc("GET /backends", g.handleBackends)
+	g.mux.Handle("GET /metrics", promhttp.HandlerFor(g.metrics.reg, promhttp.HandlerOpts{}))
 	return g
 }
 
@@ -118,14 +124,25 @@ func (g *Gateway) untried(tried map[*router.Backend]bool) []*router.Backend {
 }
 
 func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	start := time.Now()
+	rec := &recorder{ResponseWriter: w}
+	served := "none"
+	defer func() {
+		code := rec.status
+		if code == 0 {
+			code = 499 // nothing was written: the client went away first
+		}
+		g.metrics.requests.WithLabelValues(served, strconv.Itoa(code)).Inc()
+	}()
+
+	body, err := io.ReadAll(http.MaxBytesReader(rec, r.Body, maxBodyBytes))
 	if err != nil {
-		http.Error(w, "request body unreadable or too large", http.StatusBadRequest)
+		http.Error(rec, "request body unreadable or too large", http.StatusBadRequest)
 		return
 	}
 	var cr chatRequest
 	if err := json.Unmarshal(body, &cr); err != nil || len(cr.Messages) == 0 {
-		http.Error(w, "invalid chat request", http.StatusBadRequest)
+		http.Error(rec, "invalid chat request", http.StatusBadRequest)
 		return
 	}
 	var sb strings.Builder
@@ -145,12 +162,14 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 	attempts := 0
 	var pickErr error
 	for attempts < g.maxAttempts() {
+		t0 := time.Now()
 		g.pickMu.Lock()
 		b, perr := g.policy.Pick(req, g.untried(tried))
 		if perr == nil {
 			b.Acquire() // reserve under the lock; tryBackend releases it
 		}
 		g.pickMu.Unlock()
+		g.metrics.pick.Observe(time.Since(t0).Seconds())
 		if perr != nil {
 			pickErr = perr
 			break
@@ -160,19 +179,20 @@ func (g *Gateway) handleChat(w http.ResponseWriter, r *http.Request) {
 		if attempts > 1 {
 			g.retries.Add(1)
 		}
-		if g.tryBackend(w, r, b, body, req.ID, attempts) {
+		if g.tryBackend(rec, r, b, body, req.ID, attempts, start) {
+			served = b.ID
 			return
 		}
 	}
 	if attempts == 0 {
 		if errors.Is(pickErr, router.ErrNoBackends) {
-			http.Error(w, "no healthy backends", http.StatusServiceUnavailable)
+			http.Error(rec, "no healthy backends", http.StatusServiceUnavailable)
 		} else {
-			http.Error(w, "routing error", http.StatusInternalServerError)
+			http.Error(rec, "routing error", http.StatusInternalServerError)
 		}
 		return
 	}
-	http.Error(w, "all upstream attempts failed", http.StatusBadGateway)
+	http.Error(rec, "all upstream attempts failed", http.StatusBadGateway)
 }
 
 // isConnReset reports whether err looks like the peer closing or resetting a connection.
@@ -217,8 +237,9 @@ func (g *Gateway) do(ctx context.Context, b *router.Backend, body []byte, reqID 
 // tryBackend returns true once the response is committed to the client (success,
 // a client-side error, a timeout, or a mid-stream failure) and false if the attempt
 // failed before any byte reached the client, so the caller may retry elsewhere.
-func (g *Gateway) tryBackend(w http.ResponseWriter, r *http.Request, b *router.Backend, body []byte, reqID string, attempt int) bool {
-	defer b.Release() // the caller reserved this slot under pickMu
+// The caller has already reserved a slot on b; tryBackend releases it.
+func (g *Gateway) tryBackend(w http.ResponseWriter, r *http.Request, b *router.Backend, body []byte, reqID string, attempt int, start time.Time) bool {
+	defer b.Release()
 
 	resp, err := g.do(r.Context(), b, body, reqID)
 	if err != nil {
@@ -261,11 +282,16 @@ func (g *Gateway) tryBackend(w http.ResponseWriter, r *http.Request, b *router.B
 	tail := make([]byte, 0, 64)
 	sawDone := false
 	failed := false
+	gotFirst := false
 	for {
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
 			if _, werr := w.Write(buf[:n]); werr != nil {
 				return true // client went away
+			}
+			if !gotFirst {
+				gotFirst = true
+				g.metrics.firstChunk.WithLabelValues(b.ID).Observe(time.Since(start).Seconds())
 			}
 			if flusher != nil {
 				flusher.Flush()
